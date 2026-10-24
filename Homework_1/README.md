@@ -6,7 +6,7 @@ Author: **Yarin Oziel**.
 A generator for the k-ary fat-tree of Al-Fares, Loukissas and Vahdat [1], a link failure
 model, and a quantitative study of **how the average host-to-host path length degrades as
 links fail**.
-
+![k=4 fat-tree-paper](paper_support/fig3_topology.png)
 ![k=4 fat-tree](results/fig0_topology_k4.png)
 
 ---
@@ -52,8 +52,8 @@ python3 tests/test_fattree.py             # unit tests
 Everything written below was produced by:
 
 ```bash
-python main.py all --k 8
-python main.py experiment --k 8 --failure-scope fabric \
+python3 main.py all --k 8
+python3 main.py experiment --k 8 --failure-scope fabric \
        --rates linspace:0,0.6,13 --trials 20 --outdir results/fabric
 ```
 
@@ -65,8 +65,8 @@ switches, which is the central claim of [1]. Everything else follows:
 | | count | why |
 |---|---|---|
 | pods | k | by definition |
-| edge switches | k²/2 | k/2 per pod; k/2 ports down to hosts, k/2 up |
-| aggregation switches | k²/2 | k/2 per pod, complete bipartite with the edge layer |
+| edge switches | k²/2 | k/2 per pod x k pods; k/2 ports down to hosts, k/2 up|
+| aggregation switches | k²/2 | k/2 per pod x k pods, complete bipartite with the edge layer |
 | core switches | (k/2)² | k/2 groups of k/2; each has one port per pod |
 | hosts | k³/4 | k/2 per edge switch |
 | links | 3k³/4 | k³/4 in each of the three layers |
@@ -78,7 +78,7 @@ reason the failure results below look the way they do. The generator also assign
 paper's IP addresses (`10.pod.switch.ID`, core at `10.k.j.i`) as node attributes so the
 output can be checked against the figures in [1].
 
-**Verification.** `python main.py validate --k 8` runs 17 structural assertions — exact node
+**Verification.** `python3 main.py validate --k 8` runs 17 structural assertions — exact node
 and link counts, every switch using exactly k ports, strict layering (no link ever skips or
 stays inside a tier), each core switch touching every pod exactly once, connectivity, the
 2/4/6-hop distance pattern matching a closed form computed independently, and a bisection
@@ -131,7 +131,7 @@ generator and the measurement agree.
 
 ### Experiment A — failures anywhere in the network (`--failure-scope all`)
 
-`python main.py experiment --k 8` — k = 8 (128 hosts, 80 switches, 384 links), 11 failure
+`python3 main.py experiment --k 8` — k = 8 (128 hosts, 80 switches, 384 links), 11 failure
 rates, 20 independent trials each, all 16 256 ordered host pairs measured per trial.
 
 ![path length vs failure rate](results/fig1_path_length_k8.png)
@@ -171,7 +171,7 @@ have made a collapsing network look healthy.
 To see the stretch effect on its own, the same experiment with the host uplinks protected,
 over a much wider range of p:
 
-`python main.py experiment --k 8 --failure-scope fabric --rates linspace:0,0.6,13 --trials 20 --outdir results/fabric`
+`python3 main.py experiment --k 8 --failure-scope fabric --rates linspace:0,0.6,13 --trials 20 --outdir results/fabric`
 
 ![fabric-only failures](results/fabric/fig1_path_length_k8.png)
 
@@ -200,7 +200,7 @@ Comparing A and B isolates the two failure mechanisms cleanly: experiment A's de
 dominated by the un-redundant host links, experiment B's by the exhaustion of fabric path
 diversity, and the fabric's threshold sits an order of magnitude higher in p.
 
-### Experiment C — scale (`python main.py scale`)
+### Experiment C — scale (`python3 main.py scale`)
 
 ![scale](results/fig3_scale.png)
 
