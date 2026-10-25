@@ -29,18 +29,6 @@ heavy failures, because the long cross-pod pairs are the first to be cut and
 only the short intra-rack pairs survive. That observation is worth a
 paragraph in the README.
 
--------------------------------------------------------------------------
-WHERE TO EDIT
--------------------------------------------------------------------------
-* `host_path_stats` is a plain BFS sweep. Swap in a different question:
-  weighted links (nx.single_source_dijkstra_length), path *count* instead
-  of path length (see `count_shortest_paths`), or restrict the host pairs
-  to cross-pod ones only (`pair_filter`) which isolates the core layer's
-  contribution.
-* `sample_sources` trades accuracy for speed. For k <= 8 just measure
-  every pair; for k >= 16 sampling a few dozen sources is plenty, and the
-  experiment module reports the standard deviation across trials so you can
-  see whether your sample size is big enough.
 """
 
 from __future__ import annotations

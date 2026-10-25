@@ -9,7 +9,9 @@ Sub-commands
                 the closed forms from the paper?)
     experiment  sweep the link failure rate, write CSV + figures
     scale       sweep k at a fixed failure rate, write CSV + figure
-    all         validate, then run both sweeps and draw every figure
+    compare     run the identical sweep over both topology variants (the
+                controlled experiment) -> CSV + figure 4
+    all         validate, then run every sweep and draw every figure
 
 Input parameters (assignment section 3) -- all optional, all documented by
 `--help`, and all overridable from a JSON config file (section 4):
@@ -23,6 +25,7 @@ Input parameters (assignment section 3) -- all optional, all documented by
     --failure-scope     all | fabric | agg-core | edge-agg
     --pair-filter       all | cross-pod | intra-pod host pairs
     --sample-sources    measure from this many source hosts instead of all
+    --variant           standard | thin-core (the control topology)
     --outdir            where CSVs and PNGs go
 
 Examples
@@ -45,7 +48,9 @@ import sys
 from pathlib import Path
 
 from fattree import (
+    VARIANTS,
     build_fat_tree,
+    compare_variants,
     describe,
     fail_links,
     host_path_stats,
@@ -61,6 +66,7 @@ from fattree.plots import (
     plot_failure_sweep,
     plot_k_sweep,
     plot_topology,
+    plot_variant_comparison,
 )
 
 DEFAULTS = {
@@ -74,6 +80,7 @@ DEFAULTS = {
     "failure_scope": "all",
     "pair_filter": "all",
     "sample_sources": None,
+    "variant": "standard",
     "outdir": "results",
 }
 
@@ -107,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("command",
-                        choices=["build", "validate", "experiment", "scale", "all"],
+                        choices=["build", "validate", "experiment", "scale",
+                                 "compare", "all"],
                         help="what to run")
     parser.add_argument("--config", help="JSON file with any of the options below")
     parser.add_argument("--k", type=int, help="switch port count (even, >= 2)")
@@ -123,6 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--failure-scope",
                         choices=["all", "fabric", "agg-core", "edge-agg"])
     parser.add_argument("--pair-filter", choices=["all", "cross-pod", "intra-pod"])
+    parser.add_argument("--variant", choices=list(VARIANTS),
+                        help="topology variant: 'standard' is the fat-tree of [1]; "
+                             "'thin-core' keeps one uplink per aggregation switch "
+                             "(the control topology)")
     parser.add_argument("--sample-sources", type=int,
                         help="measure from N source hosts instead of all of them")
     parser.add_argument("--outdir", help="directory for CSV and PNG output")
@@ -146,9 +158,9 @@ def resolve_settings(args: argparse.Namespace) -> dict:
 # Commands
 # ---------------------------------------------------------------------------
 def cmd_build(s: dict, make_plots: bool) -> None:
-    g = build_fat_tree(s["k"])
+    g = build_fat_tree(s["k"], variant=s["variant"])
     info = describe(g)
-    print(f"Fat-tree with k = {s['k']}")
+    print(f"Fat-tree with k = {s['k']} (variant: {s['variant']})")
     for key, value in info.items():
         print(f"  {key:<18} {value}")
     print(f"  {'avg path length':<18} {theoretical_avg_path_length(s['k']):.4f} hops "
@@ -172,12 +184,14 @@ def cmd_build(s: dict, make_plots: bool) -> None:
               f"{switches_with_multiple_failures(result)}")
 
     if make_plots and s["k"] <= 6:
-        out = plot_topology(s["k"], Path(s["outdir"]) / f"topology_k{s['k']}.png")
+        out = plot_topology(s["k"],
+                            Path(s["outdir"]) / f"topology_k{s['k']}_{s['variant']}.png",
+                            variant=s["variant"])
         print(f"\nwrote {out}")
 
 
 def cmd_validate(s: dict) -> None:
-    validate_fat_tree(s["k"])
+    validate_fat_tree(s["k"], variant=s["variant"])
 
 
 def cmd_experiment(s: dict, make_plots: bool) -> None:
@@ -188,12 +202,31 @@ def cmd_experiment(s: dict, make_plots: bool) -> None:
         trials=s["trials"], seed=s["seed"],
         mode=s["failure_mode"], scope=s["failure_scope"],
         sample_sources=s["sample_sources"], pair_filter=s["pair_filter"],
+        variant=s["variant"],
     )
     csv_path = write_csv(rows, Path(s["outdir"]) / f"failure_sweep_k{s['k']}.csv")
     print(f"wrote {csv_path}")
     if make_plots:
         print("wrote", plot_failure_sweep(rows, Path(s["outdir"]) / f"fig1_path_length_k{s['k']}.png"))
         print("wrote", plot_connectivity(rows, Path(s["outdir"]) / f"fig2_connectivity_k{s['k']}.png"))
+
+
+def cmd_compare(s: dict, make_plots: bool) -> None:
+    """The controlled experiment: identical sweep, two topologies."""
+    print(f"Comparing topology variants at k={s['k']}, trials={s['trials']}, "
+          f"seed={s['seed']}, scope={s['failure_scope']}")
+    results = compare_variants(
+        s["k"], s["rates"],
+        trials=s["trials"], seed=s["seed"],
+        mode=s["failure_mode"], scope=s["failure_scope"],
+        sample_sources=s["sample_sources"], pair_filter=s["pair_filter"],
+    )
+    flat = [row for rows in results.values() for row in rows]
+    csv_path = write_csv(flat, Path(s["outdir"]) / f"variant_comparison_k{s['k']}.csv")
+    print(f"wrote {csv_path}")
+    if make_plots:
+        print("wrote", plot_variant_comparison(
+            results, Path(s["outdir"]) / f"fig4_variant_comparison_k{s['k']}.png"))
 
 
 def cmd_scale(s: dict, make_plots: bool) -> None:
@@ -224,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_experiment(s, make_plots)
     elif args.command == "scale":
         cmd_scale(s, make_plots)
+    elif args.command == "compare":
+        cmd_compare(s, make_plots)
     elif args.command == "all":
         cmd_validate(s)
         print()
@@ -233,6 +268,18 @@ def main(argv: list[str] | None = None) -> int:
             print("wrote", plot_topology(4, Path(s["outdir"]) / "fig0_topology_k4.png"))
         print()
         cmd_experiment(s, make_plots)
+        print()
+        # The variant comparison deliberately runs with scope="fabric" over a
+        # wider range of p. Host uplinks are identical in both variants and are
+        # the dominant failure mode, so leaving them in would add the same large
+        # effect to both curves and bury the one thing being measured. Holding
+        # them constant is what makes this a controlled experiment rather than
+        # two sweeps plotted on the same axes.
+        cmd_compare(
+            dict(s, failure_scope="fabric",
+                 rates=[round(0.05 * i, 3) for i in range(13)]),
+            make_plots,
+        )
         print()
         cmd_scale(s, make_plots)
     return 0

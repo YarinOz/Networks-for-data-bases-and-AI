@@ -18,7 +18,7 @@ Typical use from a notebook or your own script:
     print(host_path_stats(damaged))
 """
 
-from .experiment import sweep_failure_rate, sweep_k, write_csv
+from .experiment import compare_variants, sweep_failure_rate, sweep_k, write_csv
 from .failures import fail_links, fail_switches, switches_with_multiple_failures
 from .metrics import (
     PathStats,
@@ -31,6 +31,9 @@ from .topology import (
     CORE,
     EDGE,
     HOST,
+    STANDARD,
+    THIN_CORE,
+    VARIANTS,
     FatTreeSpec,
     build_fat_tree,
     describe,
@@ -49,6 +52,9 @@ __all__ = [
     "AGGREGATION",
     "EDGE",
     "HOST",
+    "STANDARD",
+    "THIN_CORE",
+    "VARIANTS",
     "fail_links",
     "fail_switches",
     "switches_with_multiple_failures",
@@ -57,6 +63,7 @@ __all__ = [
     "count_shortest_paths",
     "theoretical_avg_path_length",
     "sweep_failure_rate",
+    "compare_variants",
     "sweep_k",
     "write_csv",
     "validate_fat_tree",

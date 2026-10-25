@@ -17,15 +17,6 @@ Plotting conventions used throughout (worth keeping if you restyle):
     which is what makes the "is this bend real or is it noise?" question
     answerable.
 
--------------------------------------------------------------------------
-WHERE TO EDIT
--------------------------------------------------------------------------
-* PALETTE below is a four-colour categorical palette checked for
-  colour-vision-deficiency separation. Replace it with your own if you
-  like, but keep the colours far apart in lightness as well as hue.
-* `plot_topology` draws tiers as rows; for k >= 8 it gets crowded, which is
-  exactly why it defaults to k = 4 in the CLI. If you want a prettier
-  picture, try drawing only one pod plus the core layer.
 """
 
 from __future__ import annotations
@@ -42,6 +33,8 @@ from .topology import (  # noqa: E402
     CORE,
     EDGE,
     HOST,
+    STANDARD,
+    FatTreeSpec,
     build_fat_tree,
     nodes_of_tier,
 )
@@ -142,8 +135,25 @@ def plot_connectivity(rows: list[dict], path: str | Path) -> Path:
 
 
 def plot_k_sweep(rows: list[dict], path: str | Path) -> Path:
-    """Figure 3 -- scale effects at a fixed failure rate. Two panels because
-    the two quantities have different units; never two y-axes on one panel."""
+    """Figure 3 -- scale effects at a fixed failure rate.
+
+    Three panels, because the three quantities have different units and must
+    never share a y-axis. Read left to right they answer one question: as the
+    network grows, does it get *worse*?
+
+        left    how big the network is            (k^3/4 hosts)
+        middle  how much damage lands on it       (absolute count)
+        right   how much of it still works        (a fraction)
+
+    The middle panel rises and the right panel does not. That contrast is the
+    finding: the growth in the middle panel is a counting effect, not a loss
+    of robustness, and showing it without the right panel beside it invites
+    exactly the wrong conclusion.
+
+    The reachability axis is drawn on its full 0..1 range on purpose. Zooming
+    in on a flat line is the standard way to manufacture a trend out of noise;
+    the per-point labels give the precision that the un-zoomed axis gives up.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -151,9 +161,11 @@ def plot_k_sweep(rows: list[dict], path: str | Path) -> Path:
     hosts = [r["hosts"] for r in rows]
     multi = [r["switches_multi_failure"] for r in rows]
     multi_err = [r.get("switches_multi_failure_std", 0.0) for r in rows]
+    reach = [r["reachability"] for r in rows]
+    reach_err = [r.get("reachability_std", 0.0) for r in rows]
     p = rows[0]["failure_rate"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), dpi=160)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.3), dpi=160)
 
     axes[0].plot(ks, hosts, color=PALETTE[0], linewidth=2, marker="o", markersize=6)
     for kx, hy in zip(ks, hosts):
@@ -169,7 +181,20 @@ def plot_k_sweep(rows: list[dict], path: str | Path) -> Path:
     )
     _style(axes[1], xlabel="switch port count k",
            ylabel="switches with >= 2 failed links",
-           title=f"Multi-link failures at p={p:g}")
+           title=f"Damage grows in absolute terms (p={p:g})")
+
+    axes[2].errorbar(
+        ks, reach, yerr=reach_err,
+        color=PALETTE[2], linewidth=2, marker="^", markersize=7,
+        capsize=4, elinewidth=1.2,
+    )
+    for kx, ry in zip(ks, reach):
+        axes[2].annotate(f"{ry:.1%}", (kx, ry), textcoords="offset points",
+                         xytext=(0, 11), ha="center", fontsize=8, color="#374151")
+    axes[2].set_ylim(0, 1.12)
+    _style(axes[2], xlabel="switch port count k",
+           ylabel="fraction of host pairs connected",
+           title=f"...but relative health is flat (p={p:g})")
 
     fig.tight_layout()
     fig.savefig(path)
@@ -177,13 +202,69 @@ def plot_k_sweep(rows: list[dict], path: str | Path) -> Path:
     return path
 
 
-def plot_topology(k: int, path: str | Path, *, show_hosts: bool = True) -> Path:
+def plot_variant_comparison(results: dict[str, list[dict]], path: str | Path) -> Path:
+    """Figure 4 -- the controlled experiment.
+
+    The same failure sweep run over topologies that differ in exactly one
+    property: the number of equal-cost paths between pods. Two panels, because
+    hops and fractions are different units and never belong on one axis.
+
+    Each variant keeps its own colour across both panels, so a reader who
+    learns the legend once can read the whole figure.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    markers = ["o", "s", "^", "D"]
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.4), dpi=160)
+
+    k = next(iter(results.values()))[0]["k"]
+    baseline = next(iter(results.values()))[0]["avg_path_len_baseline"]
+    axes[0].axhline(baseline, color=BASELINE_COLOR, linestyle="--", linewidth=1.5,
+                    label=f"fault-free baseline ({baseline:.2f} hops)")
+
+    for i, (variant, rows) in enumerate(results.items()):
+        spec = FatTreeSpec(k, variant)
+        label = f"{variant} ({spec.cross_pod_paths} cross-pod paths)"
+        colour, marker = PALETTE[i % len(PALETTE)], markers[i % len(markers)]
+        x = [r["failure_rate"] for r in rows]
+
+        axes[0].errorbar(
+            x, [r["avg_path_len"] for r in rows],
+            yerr=[r["avg_path_len_std"] for r in rows],
+            color=colour, linewidth=2, marker=marker, markersize=6,
+            capsize=4, elinewidth=1.2, label=label,
+        )
+        axes[1].errorbar(
+            x, [r["reachability"] for r in rows],
+            yerr=[r["reachability_std"] for r in rows],
+            color=colour, linewidth=2, marker=marker, markersize=6,
+            capsize=4, elinewidth=1.2, label=label,
+        )
+
+    _style(axes[0], xlabel="link failure probability p",
+           ylabel="average path length (hops)",
+           title=f"Path length: diversity absorbs failures (k={k})")
+    _style(axes[1], xlabel="link failure probability p",
+           ylabel="fraction of host pairs connected",
+           title=f"Reachability (k={k})")
+    axes[0].legend(frameon=False, loc="upper left", fontsize=9)
+    axes[1].legend(frameon=False, loc="lower left", fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def plot_topology(k: int, path: str | Path, *, show_hosts: bool = True,
+                  variant: str = STANDARD) -> Path:
     """Figure 0 -- a picture of the generated graph, to prove by eye that the
     wiring rule does what the paper describes. Keep k small (4 or 6)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    g = build_fat_tree(k, with_hosts=show_hosts)
+    g = build_fat_tree(k, variant=variant, with_hosts=show_hosts)
     tiers = [CORE, AGGREGATION, EDGE] + ([HOST] if show_hosts else [])
     colors = {CORE: PALETTE[3], AGGREGATION: PALETTE[0],
               EDGE: PALETTE[2], HOST: "#6B7280"}
@@ -209,7 +290,7 @@ def plot_topology(k: int, path: str | Path, *, show_hosts: bool = True) -> Path:
                    color=colors[tier], zorder=2, label=f"{tier} ({len(nodes)})",
                    edgecolors="white", linewidths=1.0)
 
-    ax.set_title(f"k = {k} fat-tree: {g.number_of_nodes()} nodes, "
+    ax.set_title(f"k = {k} fat-tree ({variant}): {g.number_of_nodes()} nodes, "
                  f"{g.number_of_edges()} links",
                  loc="left", fontsize=12, fontweight="bold")
     ax.set_xticks([])

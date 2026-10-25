@@ -23,7 +23,12 @@ from fattree import (  # noqa: E402
     theoretical_avg_path_length,
     validate_fat_tree,
 )
-from fattree.topology import host_name  # noqa: E402
+from fattree.topology import (  # noqa: E402
+    AGGREGATION,
+    CORE,
+    host_name,
+    nodes_of_tier,
+)
 
 
 def test_counts_for_k4():
@@ -59,6 +64,43 @@ def test_path_diversity():
     assert cross == half * half, cross
     assert same_pod == half, same_pod
     assert same_rack == 1, same_rack
+
+
+def test_thin_core_variant_counts():
+    """The control topology: same hosts, same pods, same edge/agg layer,
+    a core that is k/2 wide instead of (k/2)^2."""
+    k = 8
+    std = build_fat_tree(k)
+    thin = build_fat_tree(k, variant="thin-core")
+
+    assert len(hosts(std)) == len(hosts(thin)) == k ** 3 // 4
+    assert len(nodes_of_tier(thin, CORE)) == k // 2            # 4, not 16
+    assert len(nodes_of_tier(thin, AGGREGATION)) == len(nodes_of_tier(std, AGGREGATION))
+    # Only the top layer loses links: k^2/2 agg-core links instead of k^3/4.
+    assert thin.number_of_edges() == k ** 3 // 2 + k ** 2 // 2
+
+
+def test_thin_core_has_less_path_diversity():
+    k = 8
+    std, thin = build_fat_tree(k), build_fat_tree(k, variant="thin-core")
+    a, b = host_name(0, 0, 0), host_name(1, 0, 0)       # different pods
+    assert count_shortest_paths(std, a, b) == (k // 2) ** 2   # 16
+    assert count_shortest_paths(thin, a, b) == k // 2         # 4
+    # ...but the paths are the same *length* in both; diversity is what differs.
+    assert host_path_stats(thin).avg_path_len == host_path_stats(std).avg_path_len
+
+
+def test_thin_core_passes_its_own_structural_checks():
+    for k in (4, 6, 8):
+        validate_fat_tree(k, variant="thin-core", verbose=False)
+
+
+def test_unknown_variant_rejected():
+    try:
+        build_fat_tree(4, variant="banana")
+    except ValueError:
+        return
+    raise AssertionError("unknown variant should have been rejected")
 
 
 def test_measured_matches_closed_form():

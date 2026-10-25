@@ -20,15 +20,6 @@ and handed to the plotting module. Keeping the data as rows, not as plot
 objects, means you can re-plot or re-analyse without re-running the sweep --
 runs for large k are the slow part.
 
--------------------------------------------------------------------------
-WHERE TO EDIT
--------------------------------------------------------------------------
-* Change the sweep variable: the loop below walks over p, but swapping it
-  for a loop over k (holding p at 0.01) gives the "intermediate" metric from
-  the assignment sheet almost for free -- `sweep_k` does exactly that.
-* Add a column: anything you can compute from `FailureResult` or the damaged
-  graph can be appended to the `row` dict and it will flow through to the
-  CSV and the plots automatically.
 """
 
 from __future__ import annotations
@@ -41,7 +32,7 @@ from pathlib import Path
 
 from .failures import fail_links, switches_with_multiple_failures
 from .metrics import host_path_stats, theoretical_avg_path_length
-from .topology import build_fat_tree
+from .topology import STANDARD, VARIANTS, build_fat_tree
 
 
 def _mean_std(values: list[float]) -> tuple[float, float]:
@@ -63,10 +54,11 @@ def sweep_failure_rate(
     scope: str = "all",
     sample_sources: int | None = None,
     pair_filter: str = "all",
+    variant: str = STANDARD,
     verbose: bool = True,
 ) -> list[dict]:
     """Main experiment: metrics vs link failure probability."""
-    base = build_fat_tree(k)
+    base = build_fat_tree(k, variant=variant)
     baseline = theoretical_avg_path_length(k)
     rows: list[dict] = []
 
@@ -98,6 +90,7 @@ def sweep_failure_rate(
 
         row = {
             "k": k,
+            "variant": variant,
             "failure_rate": p,
             "realised_failure_rate": realised_mean,
             "trials": trials,
@@ -123,6 +116,41 @@ def sweep_failure_rate(
             )
 
     return rows
+
+
+def compare_variants(
+    k: int,
+    rates: list[float],
+    *,
+    variants: tuple[str, ...] = VARIANTS,
+    verbose: bool = True,
+    **kwargs,
+) -> dict[str, list[dict]]:
+    """Run the identical failure sweep over several topology variants.
+
+    This is the controlled experiment. Both networks have the same k, the same
+    k^3/4 hosts, the same pods, the same edge<->aggregation layer and the same
+    per-link failure probability; the only thing that differs is how many
+    equal-cost paths exist between pods. Any gap between the resulting curves
+    is therefore attributable to path diversity and to nothing else.
+
+    One honest caveat to state when presenting the result: the thin-core
+    network has fewer links (k^2/2 instead of k^3/4 in the top layer), so at a
+    given p it suffers fewer failures in absolute terms. That confound works
+    *against* the hypothesis -- the crippled topology is handed an advantage
+    and still degrades faster -- so it strengthens rather than weakens the
+    conclusion.
+
+    Returns {variant: rows}, ready for `plots.plot_variant_comparison`.
+    """
+    results: dict[str, list[dict]] = {}
+    for variant in variants:
+        if verbose:
+            print(f"  -- variant: {variant}")
+        results[variant] = sweep_failure_rate(
+            k, rates, variant=variant, verbose=verbose, **kwargs
+        )
+    return results
 
 
 def sweep_k(
@@ -152,7 +180,7 @@ def sweep_k(
             multi.append(float(switches_with_multiple_failures(result)))
 
         apl_mean, apl_std = _mean_std(apl)
-        reach_mean, _ = _mean_std(reach)
+        reach_mean, reach_std = _mean_std(reach)
         multi_mean, multi_std = _mean_std(multi)
         rows.append({
             "k": k,
@@ -164,6 +192,7 @@ def sweep_k(
             "avg_path_len": apl_mean,
             "avg_path_len_std": apl_std,
             "reachability": reach_mean,
+            "reachability_std": reach_std,
             "switches_multi_failure": multi_mean,
             "switches_multi_failure_std": multi_std,
             "seed": seed,

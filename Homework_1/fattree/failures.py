@@ -19,18 +19,6 @@ Both take a seeded `random.Random` so every experiment is reproducible --
 the seed is printed by the CLI and stored in the CSV, so a result can always
 be regenerated.
 
--------------------------------------------------------------------------
-WHERE TO EDIT
--------------------------------------------------------------------------
-* `scope` decides which links are eligible to fail. "all" is the default;
-  "fabric" protects the single host uplinks (so a host is never cut off and
-  the average-path-length curve is not dominated by isolated hosts);
-  "agg-core" only breaks the top layer. Add your own scope by extending
-  `_eligible_links` -- e.g. "one-pod" to model a single faulty pod, or a
-  weighted model where core links are more reliable than edge links.
-* `fail_switches` is included as a bonus: correlated failures (a whole
-  switch dying) are much harsher than independent link failures, and
-  comparing the two makes a nice extra figure.
 """
 
 from __future__ import annotations

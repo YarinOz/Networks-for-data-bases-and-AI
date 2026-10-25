@@ -26,19 +26,6 @@ switches, which is the whole point of the paper):
 
 k must be even (a switch splits its ports evenly between up and down).
 
--------------------------------------------------------------------------
-WHERE TO EDIT
--------------------------------------------------------------------------
-* `_wire_core_layer` is the only place that decides which aggregation
-  switch talks to which core switch. Swap that rule and you get a
-  different (possibly broken, possibly interesting) topology -- a good
-  place to experiment.
-* Node names are produced by the `*_name` helpers. Change them freely;
-  nothing else in the project parses names, everything reads the node
-  attributes instead.
-* Every node carries attributes: tier, pod, index and the paper's IP
-  address. Add your own attributes here (e.g. a per-switch failure
-  domain, a rack id, a cost) and the metrics module can use them.
 """
 
 from __future__ import annotations
@@ -56,6 +43,30 @@ EDGE = "edge"
 HOST = "host"
 
 SWITCH_TIERS = (CORE, AGGREGATION, EDGE)
+
+# ---------------------------------------------------------------------------
+# Topology variants.
+#
+# "standard"  the fat-tree of [1]: every aggregation switch has k/2 uplinks,
+#             one to each core switch of its core group.
+#
+# "thin-core" a deliberately crippled control: every aggregation switch keeps
+#             exactly ONE uplink, so the core shrinks from (k/2)^2 switches to
+#             k/2. Hosts, pods, edge switches and the entire edge<->aggregation
+#             layer are bit-for-bit identical to the standard tree; the only
+#             thing that changes is the number of equal-cost paths between
+#             pods, which drops from (k/2)^2 to k/2.
+#
+#             This is not a strawman -- it is an oversubscribed data centre,
+#             the thing most real deployments actually build to save money. At
+#             k=8 it is a 4:1 oversubscribed network. Running the identical
+#             failure sweep over both variants isolates path diversity as the
+#             *cause* of the fat-tree's fault tolerance, because it is the only
+#             variable that differs.
+# ---------------------------------------------------------------------------
+STANDARD = "standard"
+THIN_CORE = "thin-core"
+VARIANTS = (STANDARD, THIN_CORE)
 
 # Link "kind" attribute -- which two tiers a link joins.
 HOST_LINK = "host-edge"
@@ -109,10 +120,20 @@ def host_ip(pod: int, edge_index: int, index: int) -> str:
 
 @dataclass(frozen=True)
 class FatTreeSpec:
-    """The counts implied by k. Handy for sanity checks and for plots that
-    need the theoretical numbers without building the graph."""
+    """The counts implied by k (and the variant). Handy for sanity checks and
+    for plots that need the theoretical numbers without building the graph.
+
+    Everything below is derived from `uplinks_per_agg`, so adding a third
+    variant means adding one line there and nothing else."""
 
     k: int
+    variant: str = STANDARD
+
+    @property
+    def uplinks_per_agg(self) -> int:
+        """Core switches reachable from one aggregation switch. This single
+        number is the entire difference between the variants."""
+        return self.k // 2 if self.variant == STANDARD else 1
 
     @property
     def pods(self) -> int:
@@ -124,7 +145,9 @@ class FatTreeSpec:
 
     @property
     def core_switches(self) -> int:
-        return (self.k // 2) ** 2
+        # Each core switch has exactly k ports, one per pod, so the core layer
+        # is exactly as wide as the number of uplinks leaving one pod.
+        return (self.k // 2) * self.uplinks_per_agg
 
     @property
     def agg_switches(self) -> int:
@@ -136,50 +159,97 @@ class FatTreeSpec:
 
     @property
     def switches(self) -> int:
-        return 5 * self.k ** 2 // 4
+        return self.core_switches + self.agg_switches + self.edge_switches
+
+    @property
+    def host_links(self) -> int:
+        return self.k ** 3 // 4
+
+    @property
+    def edge_agg_links(self) -> int:
+        return self.k ** 3 // 4
+
+    @property
+    def agg_core_links(self) -> int:
+        return self.agg_switches * self.uplinks_per_agg
 
     @property
     def links(self) -> int:
-        return 3 * self.k ** 3 // 4
+        return self.host_links + self.edge_agg_links + self.agg_core_links
+
+    @property
+    def agg_degree(self) -> int:
+        """k/2 ports down to the edge layer, plus however many go up."""
+        return self.k // 2 + self.uplinks_per_agg
+
+    @property
+    def cross_pod_paths(self) -> int:
+        """Equal-cost 6-hop paths between two hosts in different pods.
+
+        Every core switch touches every pod exactly once in both variants, so
+        a cross-pod path exists through each core switch and nowhere else --
+        the path count is simply the width of the core layer.
+        """
+        return self.core_switches
 
     @property
     def bisection_links(self) -> int:
-        """Number of agg->core links crossing the bisection is k^3/8 in the
-        standard cut; reported for the structural checks."""
-        return self.k ** 3 // 8
+        """Links crossing the cut between the first k/2 pods and the rest.
+        Exactly half the agg->core links, since the cut splits the pods evenly:
+        k^3/8 for the standard tree, k^2/4 for the thin core."""
+        return self.agg_core_links // 2
+
+    @property
+    def oversubscription(self) -> float:
+        """Hosts per uplink leaving a pod. 1.0 means full bisection bandwidth
+        (every host can transmit at line rate simultaneously); k/2 for the
+        thin-core variant, i.e. 4:1 at k=8."""
+        hosts_per_pod = self.k ** 2 // 4
+        uplinks_per_pod = (self.k // 2) * self.uplinks_per_agg
+        return hosts_per_pod / uplinks_per_pod
 
 
-def build_fat_tree(k: int, *, with_hosts: bool = True) -> nx.Graph:
+def build_fat_tree(
+    k: int,
+    *,
+    variant: str = STANDARD,
+    with_hosts: bool = True,
+) -> nx.Graph:
     """Build and return the k-ary fat-tree as an undirected networkx graph.
 
     Parameters
     ----------
     k
         Switch port count. Must be an even integer >= 2.
+    variant
+        "standard" (the fat-tree of [1]) or "thin-core" (the crippled control
+        described at the top of this module). See VARIANTS.
     with_hosts
         If False the host layer is skipped, leaving only the switch fabric.
         Useful when you only care about switch-level structure (faster for
         large k).
 
-    The returned graph carries graph-level attributes `k` and `spec`, node
-    attributes `tier`, `pod`, `index`, `ip` (plus `edge_index` for hosts and
-    `group` for core switches), and edge attributes `kind`.
+    The returned graph carries graph-level attributes `k`, `variant` and
+    `spec`, node attributes `tier`, `pod`, `index`, `ip` (plus `edge_index`
+    for hosts and `group` for core switches), and edge attributes `kind`.
     """
     if not isinstance(k, int):
         raise TypeError(f"k must be an int, got {type(k).__name__}")
     if k < 2 or k % 2 != 0:
         raise ValueError(f"k must be an even integer >= 2, got {k}")
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown variant {variant!r}; expected one of {VARIANTS}")
 
     half = k // 2
-    spec = FatTreeSpec(k)
+    spec = FatTreeSpec(k, variant)
 
-    g = nx.Graph(k=k, spec=spec, name=f"fat-tree-k{k}")
+    g = nx.Graph(k=k, variant=variant, spec=spec, name=f"fat-tree-k{k}-{variant}")
 
-    _add_core_switches(g, k, half)
+    _add_core_switches(g, k, spec)
     for pod in range(k):
         _add_pod(g, k, half, pod, with_hosts=with_hosts)
         _wire_pod_internals(g, half, pod)
-        _wire_core_layer(g, half, pod)
+        _wire_core_layer(g, half, pod, spec)
 
     return g
 
@@ -187,10 +257,15 @@ def build_fat_tree(k: int, *, with_hosts: bool = True) -> nx.Graph:
 # ---------------------------------------------------------------------------
 # Construction steps, each small enough to be replaced on its own.
 # ---------------------------------------------------------------------------
-def _add_core_switches(g: nx.Graph, k: int, half: int) -> None:
-    """(k/2)^2 core switches, laid out as k/2 groups of k/2."""
+def _add_core_switches(g: nx.Graph, k: int, spec: FatTreeSpec) -> None:
+    """k/2 core *groups*, each holding `uplinks_per_agg` core switches.
+
+    standard  : k/2 groups x k/2 switches = (k/2)^2 core switches
+    thin-core : k/2 groups x 1   switch  = k/2 core switches
+    """
+    half = k // 2
     for group in range(half):
-        for index in range(half):
+        for index in range(spec.uplinks_per_agg):
             g.add_node(
                 core_name(group, index),
                 tier=CORE,
@@ -247,17 +322,25 @@ def _wire_pod_internals(g: nx.Graph, half: int, pod: int) -> None:
             g.add_edge(edge_name(pod, e), agg_name(pod, a), kind=EDGE_AGG_LINK)
 
 
-def _wire_core_layer(g: nx.Graph, half: int, pod: int) -> None:
+def _wire_core_layer(g: nx.Graph, half: int, pod: int, spec: FatTreeSpec) -> None:
     """Aggregation switch `a` of every pod connects to all core switches of
     core group `a`.
 
     This is the rule that gives the fat-tree its k/2 * k/2 = (k/2)^2 distinct
-    shortest paths between hosts in different pods. Change it and you change
-    the whole character of the network -- e.g. connecting agg switch `a` to
-    only *one* core switch would turn the fabric into a plain tree.
+    shortest paths between hosts in different pods, and it is the one place
+    where the variants differ: `uplinks_per_agg` is k/2 for the standard tree
+    and 1 for the thin core.
+
+    Note what does NOT change: in both variants every core switch ends up with
+    exactly one link into every pod. That property, not the group alignment,
+    is what makes the cross-pod path count equal to the number of core
+    switches. (A fun third variant: keep k/2 uplinks but have each pod pick a
+    *random* partition of the core switches instead of the aligned groups.
+    The path count is unchanged, which shows the group structure exists for
+    routing-table simplicity, not for fault tolerance.)
     """
     for a in range(half):
-        for i in range(half):
+        for i in range(spec.uplinks_per_agg):
             g.add_edge(agg_name(pod, a), core_name(a, i), kind=AGG_CORE_LINK)
 
 
@@ -285,6 +368,7 @@ def describe(g: nx.Graph) -> dict:
     spec: FatTreeSpec = g.graph["spec"]
     return {
         "k": spec.k,
+        "variant": spec.variant,
         "pods": spec.pods,
         "hosts": len(hosts(g)),
         "core_switches": len(nodes_of_tier(g, CORE)),
@@ -295,4 +379,6 @@ def describe(g: nx.Graph) -> dict:
         "host_links": len(links_of_kind(g, HOST_LINK)),
         "edge_agg_links": len(links_of_kind(g, EDGE_AGG_LINK)),
         "agg_core_links": len(links_of_kind(g, AGG_CORE_LINK)),
+        "cross_pod_paths": spec.cross_pod_paths,
+        "oversubscription": f"{spec.oversubscription:g}:1",
     }
